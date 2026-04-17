@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>GPS Navigator</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --blue:      #3D9EFF;
+    --blue-dim:  rgba(61,158,255,0.25);
+    --green:     #3DCC7E;
+    --panel:     rgba(12, 12, 22, 0.88);
+    --text:      #FFFFFF;
+    --text-sub:  rgba(255,255,255,0.55);
+    --border:    rgba(255,255,255,0.07);
+  }
+
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #0D0D1A;
+    font-family: -apple-system, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+    touch-action: none;
+  }
+
+  /* ================================================
+     MAP WRAPPER — rotates the entire map
+  ================================================ */
+  #map-wrapper {
+    position: fixed;
+    top: 50%; left: 50%;
+    /* large enough so corners never show when rotated */
+    width: 300vmax;
+    height: 300vmax;
+    transform-origin: center center;
+    transform: translate(-50%, -50%) rotate(0deg);
+    will-change: transform;
+    /* NO css transition here — we do it in JS via rAF for zero jitter */
+  }
+
+  #map {
+    width: 100%; height: 100%;
+    background: #13131F;
+  }
+
+  .leaflet-control-attribution { display: none !important; }
+  .leaflet-control-zoom        { display: none !important; }
+
+  /* ================================================
+     MARKER
+  ================================================ */
+  .gps-marker {
+    position: relative;
+    width: 0 !important; height: 0 !important;
+    background: none !important; border: none !important;
+    outline: none !important;
+  }
+
+  /* Accuracy ring */
+  .acc-ring {
+    position: absolute;
+    width: 60px; height: 60px;
+    border: 1.5px solid rgba(61,158,255,0.35);
+    border-radius: 50%;
+    background: rgba(61,158,255,0.06);
+    top: -30px; left: -30px;
+    pointer-events: none;
+  }
+
+  /* Direction cone — points UP in map space (= forward direction) */
+  .dir-cone {
+    position: absolute;
+    width: 0; height: 0;
+    border-left:  11px solid transparent;
+    border-right: 11px solid transparent;
+    border-bottom: 46px solid rgba(61,158,255,0.38);
+    top: -55px; left: -11px;
+    filter: blur(1.5px);
+    pointer-events: none;
+  }
+
+  /* Blue dot */
+  .dot {
+    position: absolute;
+    width: 20px; height: 20px;
+    background: #3D9EFF;
+    border: 3px solid #FFFFFF;
+    border-radius: 50%;
+    top: -10px; left: -10px;
+    box-shadow: 0 0 0 5px rgba(61,158,255,0.22), 0 3px 12px rgba(0,0,0,0.55);
+    pointer-events: none;
+  }
+
+  /* Pulse ring */
+  .pulse {
+    position: absolute;
+    width: 44px; height: 44px;
+    border: 2px solid rgba(61,158,255,0.5);
+    border-radius: 50%;
+    top: -22px; left: -22px;
+    animation: gps-pulse 2.2s ease-out infinite;
+    pointer-events: none;
+  }
+
+  @keyframes gps-pulse {
+    0%   { transform: scale(0.6); opacity: 1; }
+    100% { transform: scale(2.2); opacity: 0; }
+  }
+
+  /* ================================================
+     OVERLAY UI  (always fixed — never rotates)
+  ================================================ */
+  #overlay {
+    position: fixed; inset: 0;
+    pointer-events: none;
+    z-index: 800;
+  }
+
+  /* ---------- TOP BAR ---------- */
+  #top-bar {
+    position: absolute; top: 0; left: 0; right: 0;
+    padding: env(safe-area-inset-top, 14px) 18px 22px;
+    padding-top: max(env(safe-area-inset-top), 14px);
+    background: linear-gradient(to bottom, rgba(8,8,18,0.9) 0%, transparent 100%);
+  }
+
+  #street-name {
+    font-size: 20px; font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.3px;
+    text-shadow: 0 2px 10px rgba(0,0,0,0.9);
+    transition: opacity 0.35s ease;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  #street-sub {
+    font-size: 13px; font-weight: 400;
+    color: var(--text-sub);
+    margin-top: 3px;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.8);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ---------- BOTTOM PANEL ---------- */
+  #bottom-panel {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    padding: 18px 20px;
+    padding-bottom: max(env(safe-area-inset-bottom), 24px);
+    background: linear-gradient(to top, rgba(8,8,18,0.92) 0%, transparent 100%);
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 12px;
+  }
+
+  .panel-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+
+  /* Speed box */
+  #speed-card {
+    padding: 12px 18px 10px;
+    text-align: center;
+    min-width: 86px;
+  }
+
+  #speed-value {
+    font-size: 40px; font-weight: 800;
+    color: var(--text);
+    line-height: 1;
+    letter-spacing: -2px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #speed-value.fast { color: #FF6B35; }
+  #speed-value.medium { color: #FFD93D; }
+
+  #speed-unit {
+    font-size: 10px; font-weight: 600;
+    color: var(--text-sub);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-top: 2px;
+  }
+
+  /* GPS info */
+  #gps-card {
+    padding: 9px 14px;
+    font-size: 12px;
+    color: var(--text-sub);
+    display: flex; flex-direction: column; gap: 3px;
+    text-align: right;
+  }
+
+  #gps-signal {
+    display: flex; align-items: center; gap: 5px;
+    justify-content: flex-end;
+  }
+
+  .signal-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: #3DCC7E;
+    animation: blink 2s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%,100% { opacity: 1; } 50% { opacity: 0.3; }
+  }
+
+  /* ---------- RIGHT SIDE BUTTONS ---------- */
+  #right-btns {
+    position: absolute;
+    top: 50%; right: 16px;
+    transform: translateY(-50%);
+    display: flex; flex-direction: column; gap: 10px;
+    pointer-events: all;
+  }
+
+  .icon-btn {
+    width: 46px; height: 46px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 4px 18px rgba(0,0,0,0.45);
+    transition: transform 0.12s ease, background 0.15s;
+    -webkit-user-select: none; user-select: none;
+  }
+
+  .icon-btn:active { transform: scale(0.88); background: rgba(61,158,255,0.18); }
+
+  /* Compass needle */
+  #compass-needle {
+    transition: transform 0.3s ease;
+  }
+
+  /* ================================================
+     ZOOM BUTTONS
+  ================================================ */
+  #zoom-btns {
+    position: absolute;
+    bottom: 130px; right: 16px;
+    display: flex; flex-direction: column; gap: 6px;
+    pointer-events: all;
+  }
+
+  .zoom-btn {
+    width: 40px; height: 40px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    font-size: 22px; font-weight: 300; color: var(--text);
+    transition: transform 0.1s, background 0.15s;
+    line-height: 1;
+    pointer-events: all;
+  }
+
+  .zoom-btn:active { transform: scale(0.88); background: rgba(255,255,255,0.08); }
+
+  /* ================================================
+     LOADING / STATUS SCREEN
+  ================================================ */
+  #status-screen {
+    position: fixed; inset: 0;
+    background: #0D0D1A;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    z-index: 9999;
+    gap: 18px;
+    transition: opacity 0.6s ease;
+  }
+
+  #status-screen.fade-out {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  #status-screen.gone { display: none; }
+
+  .ss-icon {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    background: rgba(61,158,255,0.12);
+    border: 2px solid rgba(61,158,255,0.3);
+    display: flex; align-items: center; justify-content: center;
+    animation: ss-pulse 1.6s ease-in-out infinite;
+  }
+
+  @keyframes ss-pulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(61,158,255,0.3); }
+    50%      { box-shadow: 0 0 0 14px rgba(61,158,255,0); }
+  }
+
+  #ss-title {
+    font-size: 19px; font-weight: 700;
+    color: var(--text); text-align: center;
+  }
+
+  #ss-sub {
+    font-size: 14px; color: var(--text-sub);
+    text-align: center;
+    max-width: 290px; line-height: 1.55;
+  }
+
+  /* Heading badge (top center) */
+  #heading-badge {
+    position: absolute;
+    top: max(env(safe-area-inset-top), 14px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 5px 14px;
+    font-size: 12px; font-weight: 600;
+    color: var(--text-sub);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    letter-spacing: 0.5px;
+    display: none;
+  }
+
+  /* Re-center indicator */
+  #recenter-btn {
+    position: absolute;
+    bottom: 140px; left: 50%; transform: translateX(-50%);
+    background: var(--blue);
+    border-radius: 24px;
+    padding: 9px 20px;
+    font-size: 13px; font-weight: 600;
+    color: #fff; letter-spacing: 0.3px;
+    display: none;
+    cursor: pointer;
+    pointer-events: all;
+    box-shadow: 0 4px 18px rgba(61,158,255,0.45);
+    transition: transform 0.12s;
+  }
+  #recenter-btn:active { transform: translateX(-50%) scale(0.93); }
+  #recenter-btn.visible { display: block; }
+</style>
+</head>
+<body>
+
+<!-- ================================================ -->
+<!--  STATUS SCREEN                                   -->
+<!-- ================================================ -->
+<div id="status-screen">
+  <div class="ss-icon">
+    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#3D9EFF" stroke-width="2" stroke-linecap="round">
+      <circle cx="12" cy="12" r="3" fill="#3D9EFF" stroke="none"/>
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>
+      <circle cx="12" cy="12" r="8" stroke-opacity="0.3"/>
+    </svg>
+  </div>
+  <div id="ss-title">Obtendo localização GPS...</div>
+  <div id="ss-sub">Aguarde enquanto o sinal é obtido. Certifique-se de estar ao ar livre.</div>
+</div>
+
+<!-- ================================================ -->
+<!--  MAP (inside rotating wrapper)                   -->
+<!-- ================================================ -->
+<div id="map-wrapper">
+  <div id="map"></div>
+</div>
+
+<!-- ================================================ -->
+<!--  FIXED OVERLAY UI (never rotates)                -->
+<!-- ================================================ -->
+<div id="overlay">
+
+  <!-- Top bar -->
+  <div id="top-bar">
+    <div id="street-name">Aguardando GPS…</div>
+    <div id="street-sub">—</div>
+  </div>
+
+  <!-- Heading indicator (top center, subtle) -->
+  <div id="heading-badge"></div>
+
+  <!-- Right side buttons -->
+  <div id="right-btns">
+    <!-- Compass / reset north -->
+    <div class="icon-btn" id="compass-btn" title="Resetar orientação">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <g id="compass-needle">
+          <polygon points="12,3 14.5,10 12,9 9.5,10" fill="#FF4B4B"/>
+          <polygon points="12,21 14.5,14 12,15 9.5,14" fill="rgba(255,255,255,0.45)"/>
+        </g>
+        <circle cx="12" cy="12" r="2" fill="rgba(255,255,255,0.7)"/>
+      </svg>
+    </div>
+
+    <!-- Center on me -->
+    <div class="icon-btn" id="center-btn" title="Centralizar">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3D9EFF" stroke-width="2.2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="3" fill="#3D9EFF" stroke="none"/>
+        <path d="M12 2v4M12 18v4M2 12h4M18 12h4"/>
+        <circle cx="12" cy="12" r="7" stroke-opacity="0.35"/>
+      </svg>
+    </div>
+  </div>
+
+  <!-- Zoom buttons -->
+  <div id="zoom-btns">
+    <div class="zoom-btn" id="zoom-in">+</div>
+    <div class="zoom-btn" id="zoom-out">−</div>
+  </div>
+
+  <!-- Re-center pill (shows when off track) -->
+  <div id="recenter-btn">↑ Seguir localização</div>
+
+  <!-- Bottom panel -->
+  <div id="bottom-panel">
+    <div class="panel-card" id="speed-card">
+      <div id="speed-value">0</div>
+      <div id="speed-unit">km/h</div>
+    </div>
+    <div class="panel-card" id="gps-card">
+      <div id="gps-signal">
+        <div class="signal-dot"></div>
+        <span id="gps-acc">GPS ativo</span>
+      </div>
+      <div id="gps-heading" style="color:var(--text-sub); font-size:11px;">Orientando…</div>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ============================================================
+//  GPS NAVIGATOR — Waze-style rotating map
+//  Smooth heading & position via rAF + EMA interpolation
+// ============================================================
+
+// ---------- DOM refs ----------
+const mapWrapper   = document.getElementById('map-wrapper');
+const statusScreen = document.getElementById('status-screen');
+const ssTitleEl    = document.getElementById('ss-title');
+const ssSubEl      = document.getElementById('ss-sub');
+const streetNameEl = document.getElementById('street-name');
+const streetSubEl  = document.getElementById('street-sub');
+const speedValEl   = document.getElementById('speed-value');
+const gpsAccEl     = document.getElementById('gps-acc');
+const gpsHeadEl    = document.getElementById('gps-heading');
+const headingBadge = document.getElementById('heading-badge');
+const recenterBtn  = document.getElementById('recenter-btn');
+const compassNeedle= document.getElementById('compass-needle');
+
+// ---------- State ----------
+let map, marker, accuracyCircle, markerEl;
+let isFirstFix  = true;
+let isFollowing = true;
+
+// Smooth values (interpolated in rAF)
+let smoothHeading = 0;
+let smoothLat     = null;
+let smoothLng     = null;
+
+// Target values (set by GPS / orientation events)
+let targetHeading = 0;
+let targetLat     = null;
+let targetLng     = null;
+
+// For heading source blending
+let gpsHeadingRaw  = null;
+let compassRaw     = null;
+let currentSpeedKmh= 0;
+
+// Geocode throttle
+let lastGeocodeTime = 0;
+let lastGeoLat = null, lastGeoLng = null;
+
+// ---------- MAP SETUP ----------
+map = L.map('map', {
+  zoomControl: false,
+  attributionControl: false,
+  dragging: false,
+  touchZoom: false,
+  doubleClickZoom: false,
+  scrollWheelZoom: false,
+  boxZoom: false,
+  keyboard: false,
+  inertia: false,
+});
+
+// CartoDB Dark Matter — clean dark tiles with street labels
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+  subdomains: 'abcd',
+  maxZoom: 19,
+  minZoom: 3,
+  keepBuffer: 6,
+}).addTo(map);
+
+map.setView([0, 0], 16);
+
+// ---------- CUSTOM MARKER ----------
+const markerIcon = L.divIcon({
+  className:  'gps-marker',
+  iconSize:   [0, 0],
+  iconAnchor: [0, 0],
+  html: `
+    <div class="acc-ring"></div>
+    <div class="dir-cone"></div>
+    <div class="pulse"></div>
+    <div class="dot"></div>
+  `,
+});
+
+marker = L.marker([0, 0], { icon: markerIcon, zIndexOffset: 1000 }).addTo(map);
+
+accuracyCircle = L.circle([0, 0], {
+  radius:      20,
+  color:       '#3D9EFF',
+  fillColor:   '#3D9EFF',
+  fillOpacity: 0.05,
+  weight:      1,
+  opacity:     0.3,
+}).addTo(map);
+
+// Get the actual DOM element of the marker after Leaflet renders it
+setTimeout(() => {
+  markerEl = marker.getElement();
+  if (markerEl) {
+    markerEl.style.willChange    = 'transform';
+    markerEl.style.transformOrigin = '0px 0px'; // anchor = [0,0]
+  }
+}, 300);
+
+// ============================================================
+//  ANIMATION LOOP  (rAF — ~60fps, no CSS transition conflicts)
+// ============================================================
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+// Shortest-path angle interpolation (handles 359→1 wrap-around)
+function lerpAngle(cur, tgt, t) {
+  let d = tgt - cur;
+  while (d >  180) d -= 360;
+  while (d < -180) d += 360;
+  return cur + d * t;
+}
+
+let prevWrapperRotation = 0; // track last applied rotation to skip redundant writes
+
+function rafLoop() {
+  requestAnimationFrame(rafLoop);
+
+  // ---- Smooth heading ----
+  // Faster convergence at speed, slower when stationary (more stable)
+  const headingAlpha = currentSpeedKmh > 8 ? 0.07 : 0.04;
+  smoothHeading = lerpAngle(smoothHeading, targetHeading, headingAlpha);
+
+  // ---- Smooth position ----
+  const posAlpha = 0.09;
+  if (targetLat !== null) {
+    if (smoothLat === null) {
+      smoothLat = targetLat;
+      smoothLng = targetLng;
+    } else {
+      smoothLat = lerp(smoothLat, targetLat, posAlpha);
+      smoothLng = lerp(smoothLng, targetLng, posAlpha);
+    }
+
+    // Update Leaflet marker (no transition — we own the timing)
+    marker.setLatLng([smoothLat, smoothLng]);
+    accuracyCircle.setLatLng([smoothLat, smoothLng]);
+
+    // Pan map to follow (only when following)
+    if (isFollowing) {
+      map.panTo([smoothLat, smoothLng], { animate: false });
+    }
+  }
+
+  // ---- Apply rotation to map wrapper ----
+  // Only write to DOM if value changed meaningfully (perf)
+  const wrapperRot = -smoothHeading;
+  if (Math.abs(wrapperRot - prevWrapperRotation) > 0.02) {
+    mapWrapper.style.transform = `translate(-50%, -50%) rotate(${wrapperRot}deg)`;
+    prevWrapperRotation = wrapperRot;
+  }
+
+  // ---- Counter-rotate the marker icon ----
+  // So the dot + cone stay visually upright in screen space
+  // transform-origin: 0px 0px  (the anchor = the lat/lng point)
+  if (markerEl) {
+    markerEl.style.transform = `rotate(${smoothHeading}deg)`;
+  }
+
+  // ---- Update compass needle in UI ----
+  // The compass needle should always show where north is
+  // Since the map rotates by -heading, north in screen is at +heading
+  compassNeedle.style.transform = `rotate(${smoothHeading}deg)`;
+}
+
+rafLoop();
+
+// ============================================================
+//  HEADING SOURCE SELECTION
+// ============================================================
+function updateTargetHeading() {
+  // Strategy:
+  //  - Moving fast (>8 km/h): trust GPS heading (most accurate for driving)
+  //  - Slow / stopped (< 8 km/h): use device compass (no GPS heading drift)
+  //  - Blend smoothly near threshold
+
+  let h = targetHeading; // keep current if no data
+
+  if (currentSpeedKmh > 8 && gpsHeadingRaw !== null && !isNaN(gpsHeadingRaw)) {
+    h = gpsHeadingRaw;
+  } else if (compassRaw !== null && !isNaN(compassRaw)) {
+    h = compassRaw;
+  } else if (gpsHeadingRaw !== null && !isNaN(gpsHeadingRaw)) {
+    h = gpsHeadingRaw;
+  }
+
+  targetHeading = h;
+
+  // Update heading text badge
+  const dirs  = ['N','NE','L','SE','S','SO','O','NO'];
+  const label = dirs[Math.round(h / 45) % 8];
+  headingBadge.textContent = `${Math.round(h)}° ${label}`;
+  gpsHeadEl.textContent = `Direção: ${Math.round(h)}°`;
+}
+
+// ============================================================
+//  GEOLOCATION WATCH
+// ============================================================
+function onPosition(pos) {
+  const { latitude: lat, longitude: lng, accuracy, speed, heading } = pos.coords;
+
+  // km/h
+  currentSpeedKmh = speed != null ? Math.round(speed * 3.6) : 0;
+
+  // GPS heading (only valid while moving)
+  if (heading !== null && !isNaN(heading) && speed > 0.5) {
+    gpsHeadingRaw = heading;
+  }
+
+  updateTargetHeading();
+  targetLat = lat;
+  targetLng = lng;
+
+  // Speed colour feedback
+  speedValEl.textContent = currentSpeedKmh;
+  speedValEl.className   = currentSpeedKmh > 80 ? 'fast' : currentSpeedKmh > 40 ? 'medium' : '';
+
+  // GPS accuracy display
+  const accM = Math.round(accuracy);
+  gpsAccEl.textContent = `±${accM} m`;
+  accuracyCircle.setRadius(accuracy);
+
+  // Adjust zoom based on speed
+  const targetZoom = currentSpeedKmh > 90 ? 14 : currentSpeedKmh > 50 ? 15 : currentSpeedKmh > 20 ? 16 : 17;
+  if (Math.abs(map.getZoom() - targetZoom) >= 1) {
+    map.setZoom(targetZoom, { animate: false });
+  }
+
+  // First fix: jump immediately
+  if (isFirstFix) {
+    isFirstFix  = false;
+    smoothLat   = lat;
+    smoothLng   = lng;
+    smoothHeading = targetHeading;
+    map.setView([lat, lng], targetZoom, { animate: false });
+    marker.setLatLng([lat, lng]);
+    accuracyCircle.setLatLng([lat, lng]);
+
+    // Dismiss status screen
+    statusScreen.classList.add('fade-out');
+    setTimeout(() => statusScreen.classList.add('gone'), 650);
+    headingBadge.style.display = 'block';
+  }
+
+  // Throttled reverse geocode (max 1 req per 6s AND 20m moved)
+  const now      = Date.now();
+  const distM    = lastGeoLat != null
+    ? Math.hypot(lat - lastGeoLat, lng - lastGeoLng) * 111320
+    : 9999;
+
+  if (now - lastGeocodeTime > 6000 && distM > 20) {
+    reverseGeocode(lat, lng);
+    lastGeocodeTime = now;
+    lastGeoLat = lat;
+    lastGeoLng = lng;
+  }
+}
+
+function onGeoError(err) {
+  ssTitleEl.textContent = 'Não foi possível obter o GPS';
+  ssSubEl.textContent   = err.code === 1
+    ? 'Permissão negada. Ative a localização no navegador e recarregue a página.'
+    : err.code === 2
+      ? 'Sinal GPS indisponível. Tente ao ar livre.'
+      : 'Tempo esgotado. Verifique sua conexão e localização.';
+}
+
+if (!navigator.geolocation) {
+  ssTitleEl.textContent = 'GPS não suportado';
+  ssSubEl.textContent   = 'Este navegador não suporta geolocalização.';
+} else {
+  navigator.geolocation.watchPosition(onPosition, onGeoError, {
+    enableHighAccuracy: true,
+    maximumAge: 0,
+    timeout: 15000,
+  });
+}
+
+// ============================================================
+//  DEVICE ORIENTATION  (compass heading)
+// ============================================================
+function handleOrientation(e) {
+  let h = null;
+
+  // iOS: webkitCompassHeading (0 = north, clockwise)
+  if (typeof e.webkitCompassHeading === 'number' && e.webkitCompassHeading >= 0) {
+    h = e.webkitCompassHeading;
+  }
+  // Android: alpha (0 = north… actually varies)
+  else if (e.alpha !== null && e.alpha !== undefined) {
+    // On most Android, alpha=0 when pointing north, increases CW
+    // But this varies by browser — we use it as fallback only
+    h = (360 - e.alpha + 360) % 360;
+  }
+
+  if (h !== null) {
+    compassRaw = h;
+    updateTargetHeading();
+  }
+}
+
+// iOS 13+ requires permission
+if (window.DeviceOrientationEvent && typeof DeviceOrientationEvent.requestPermission === 'function') {
+  // Will be requested on first user gesture
+  document.addEventListener('click', function askOnce() {
+    DeviceOrientationEvent.requestPermission()
+      .then(state => { if (state === 'granted') window.addEventListener('deviceorientation', handleOrientation, true); })
+      .catch(() => {});
+    document.removeEventListener('click', askOnce);
+  }, { once: true });
+} else {
+  window.addEventListener('deviceorientation', handleOrientation, true);
+}
+
+// ============================================================
+//  REVERSE GEOCODE  (OpenStreetMap Nominatim)
+// ============================================================
+let geocodeAbort = null;
+
+async function reverseGeocode(lat, lng) {
+  if (geocodeAbort) geocodeAbort.abort();
+  geocodeAbort = new AbortController();
+
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=17&accept-language=pt-BR`;
+    const res  = await fetch(url, {
+      signal: geocodeAbort.signal,
+      headers: { 'Accept-Language': 'pt-BR,pt;q=0.9' },
+    });
+    const data = await res.json();
+    if (data?.address) {
+      const a    = data.address;
+      const road = a.road || a.pedestrian || a.footway || a.path
+                || a.residential || a.motorway || a.trunk || a.primary
+                || a.secondary   || a.tertiary || '';
+      const num  = a.house_number ? `, ${a.house_number}` : '';
+      const city = a.city || a.town || a.village || a.suburb || a.county || '';
+      const state= a.state || '';
+
+      streetNameEl.style.opacity = '0';
+      setTimeout(() => {
+        streetNameEl.textContent   = road ? `${road}${num}` : 'Via sem nome';
+        streetSubEl.textContent    = [city, state].filter(Boolean).join(', ') || '—';
+        streetNameEl.style.opacity = '1';
+      }, 200);
+    }
+  } catch (e) {
+    // Silently ignore (abort errors are normal)
+  }
+}
+
+// ============================================================
+//  UI CONTROLS
+// ============================================================
+
+// Center / follow me
+document.getElementById('center-btn').addEventListener('click', () => {
+  if (!isFollowing) {
+    isFollowing = true;
+    recenterBtn.classList.remove('visible');
+  }
+  if (smoothLat !== null) {
+    map.setView([smoothLat, smoothLng], map.getZoom(), { animate: false });
+  }
+});
+
+// Recenter pill
+recenterBtn.addEventListener('click', () => {
+  isFollowing = true;
+  recenterBtn.classList.remove('visible');
+  if (smoothLat !== null) {
+    map.setView([smoothLat, smoothLng], map.getZoom(), { animate: false });
+  }
+});
+
+// Compass reset → point north
+document.getElementById('compass-btn').addEventListener('click', () => {
+  targetHeading = 0;
+});
+
+// Zoom buttons
+document.getElementById('zoom-in').addEventListener('click',  () => map.setZoom(map.getZoom() + 1, { animate: false }));
+document.getElementById('zoom-out').addEventListener('click', () => map.setZoom(map.getZoom() - 1, { animate: false }));
+
+// When user pans manually (shouldn't happen since dragging=false, but just in case)
+map.on('movestart', () => {
+  // If the pan was not triggered by our code, disable following
+  // We can't easily tell, so we monitor via a flag
+});
+
+// Enable limited pan on touch (optional: user can manually pan by touching)
+// We re-enable dragging for manual exploration
+let panTimeout = null;
+mapWrapper.addEventListener('touchstart', (e) => {
+  if (e.touches.length === 1 && !e.target.closest('.icon-btn, .zoom-btn')) {
+    map.dragging.enable();
+    isFollowing = false;
+    recenterBtn.classList.add('visible');
+    clearTimeout(panTimeout);
+    panTimeout = setTimeout(() => {
+      map.dragging.disable();
+    }, 3000); // re-disable after 3s of no touch
+  }
+}, { passive: true });
+
+mapWrapper.addEventListener('touchend', () => {
+  clearTimeout(panTimeout);
+  panTimeout = setTimeout(() => {
+    map.dragging.disable();
+  }, 2500);
+}, { passive: true });
+</script>
+</body>
+</html>
